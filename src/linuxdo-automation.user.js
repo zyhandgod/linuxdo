@@ -204,6 +204,27 @@
     return Math.floor(Math.random() * (max - min + 1)) + min;
   }
 
+  // DOM 元素构建工具（完全绕过 Trusted Types / innerHTML 限制）
+  function el(tag, attrs, children) {
+    var e = document.createElement(tag);
+    if (attrs) {
+      Object.keys(attrs).forEach(function(k) {
+        var v = attrs[k];
+        if (k === 'className') e.className = v;
+        else if (k === 'id') e.id = v;
+        else e.setAttribute(k, v);
+      });
+    }
+    if (children !== undefined && children !== null) {
+      if (typeof children === 'string') {
+        e.textContent = children;
+      } else if (Array.isArray(children)) {
+        children.forEach(function(c) { if (c) e.appendChild(c); });
+      }
+    }
+    return e;
+  }
+
   function isLoggedIn() {
     return document.querySelector('#current-user') !== null;
   }
@@ -1001,24 +1022,27 @@
     }
 
     init() {
+      log('init() 被调用, readyState:', document.readyState);
       if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', () => this.setup());
       } else {
+        // document-idle 时 readyState 一般是 complete，直接执行
         this.setup();
       }
     }
 
     setup() {
-      if (!isLoggedIn()) {
-        log('请先登录 Linux.do');
-        return;
-      }
-
       this.createControlPanel();
 
-      // 初始化浏览器
-      this.topicBrowser = new TopicBrowser(this.history, () => this.updateStats());
-      this.listBrowser = new TopicListBrowser(this.history, () => this.updateStats());
+      // 初始化浏览器（绑定心跳回调，避免卡住检测失效）
+      this.topicBrowser = new TopicBrowser(this.history, () => {
+        this.updateStats();
+        this.heartbeat();
+      });
+      this.listBrowser = new TopicListBrowser(this.history, () => {
+        this.updateStats();
+        this.heartbeat();
+      });
 
       // 检查是否需要自动继续
       const autoResume = Storage.get('auto_running', false);
@@ -1036,14 +1060,19 @@
     }
 
     createControlPanel() {
-      const style = document.createElement('style');
-      style.textContent = `
+      log('createControlPanel() 开始创建面板...');
+
+      // 使用 GM_addStyle 注入CSS（绕过CSP限制，更可靠）
+      const cssText = `
         #linuxdo-auto-panel {
-          position: fixed;
-          top: 80px;
-          right: 20px;
-          z-index: 99999;
-          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          position: fixed !important;
+          top: 80px !important;
+          right: 20px !important;
+          z-index: 2147483647 !important;
+          display: block !important;
+          visibility: visible !important;
+          opacity: 1 !important;
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
           border-radius: 12px;
           padding: 16px;
           box-shadow: 0 4px 20px rgba(0,0,0,0.25);
@@ -1058,7 +1087,7 @@
           padding: 10px;
         }
         #linuxdo-auto-panel.minimized .panel-content {
-          display: none;
+          display: none !important;
         }
         #linuxdo-auto-panel h3 {
           margin: 0 0 12px 0;
@@ -1159,94 +1188,98 @@
         }
         .auto-viewed { opacity: 0.6; }
       `;
-      document.head.appendChild(style);
 
-      const panel = document.createElement('div');
-      panel.id = 'linuxdo-auto-panel';
-      panel.innerHTML = `
-        <h3>
-          <span>Linux.do 自动浏览助手</span>
-          <button class="btn-minimize" id="btn-minimize">-</button>
-        </h3>
-        <div class="panel-content">
-          <div class="speed-selector">
-            <span class="speed-label">速度:</span>
-            <div class="speed-buttons">
-              <button class="speed-btn ${currentSpeed === 'slow' ? 'active' : ''}" data-speed="slow">慢</button>
-              <button class="speed-btn ${currentSpeed === 'normal' ? 'active' : ''}" data-speed="normal">正常</button>
-              <button class="speed-btn ${currentSpeed === 'fast' ? 'active' : ''}" data-speed="fast">快</button>
-              <button class="speed-btn ${currentSpeed === 'turbo' ? 'active' : ''}" data-speed="turbo">极速</button>
-            </div>
-          </div>
-          <div class="speed-selector">
-            <span class="speed-label">列表:</span>
-            <div class="speed-buttons">
-              <button class="speed-btn list-btn ${currentList === 'latest' ? 'active' : ''}" data-list="latest">最新</button>
-              <button class="speed-btn list-btn ${currentList === 'new' ? 'active' : ''}" data-list="new">新帖</button>
-              <button class="speed-btn list-btn ${currentList === 'unread' ? 'active' : ''}" data-list="unread">未读</button>
-            </div>
-          </div>
-          <div class="speed-selector">
-            <span class="speed-label">点赞:</span>
-            <div class="speed-buttons">
-              <button class="speed-btn like-btn ${enableLike ? 'active' : ''}" data-like="true">开启</button>
-              <button class="speed-btn like-btn ${!enableLike ? 'active' : ''}" data-like="false">关闭</button>
-            </div>
-          </div>
-          <div class="speed-selector">
-            <span class="speed-label">点赞概率:</span>
-            <div class="speed-buttons">
-              <button class="speed-btn chance-btn ${currentLikeChance === 'low' ? 'active' : ''}" data-chance="low">低</button>
-              <button class="speed-btn chance-btn ${currentLikeChance === 'medium' ? 'active' : ''}" data-chance="medium">中</button>
-              <button class="speed-btn chance-btn ${currentLikeChance === 'high' ? 'active' : ''}" data-chance="high">高</button>
-              <button class="speed-btn chance-btn ${currentLikeChance === 'veryHigh' ? 'active' : ''}" data-chance="veryHigh">极高</button>
-            </div>
-          </div>
-          <button class="action-btn btn-start" id="btn-auto-start">开始自动浏览</button>
-          <button class="action-btn btn-stop" id="btn-auto-stop" style="display:none;">停止运行</button>
-          <button class="action-btn btn-clear" id="btn-clear-history">清除浏览记录</button>
-          <div class="stats">
-            <div class="stats-row">
-              <span class="stats-label">状态</span>
-              <span class="stats-value">
-                <span class="status-indicator stopped" id="status-dot"></span>
-                <span id="auto-status">未启动</span>
-              </span>
-            </div>
-            <div class="stats-row">
-              <span class="stats-label">页面类型</span>
-              <span class="stats-value" id="page-type">-</span>
-            </div>
-            <div class="stats-row">
-              <span class="stats-label">本次帖子</span>
-              <span class="stats-value" id="session-viewed">0</span>
-            </div>
-            <div class="stats-row">
-              <span class="stats-label">本次回复</span>
-              <span class="stats-value" id="session-replies">0</span>
-            </div>
-            <div class="stats-row">
-              <span class="stats-label">本次点赞</span>
-              <span class="stats-value" id="session-liked">0</span>
-            </div>
-            <div class="stats-row">
-              <span class="stats-label">总计帖子</span>
-              <span class="stats-value" id="total-viewed">0</span>
-            </div>
-            <div class="stats-row">
-              <span class="stats-label">总计回复</span>
-              <span class="stats-value" id="total-replies">0</span>
-            </div>
-            <div class="stats-row">
-              <span class="stats-label">总计点赞</span>
-              <span class="stats-value" id="total-liked">0</span>
-            </div>
-          </div>
-        </div>
-      `;
+      // 优先使用 GM_addStyle，如果不可用则回退到 style 元素
+      try {
+        if (typeof GM_addStyle !== 'undefined') {
+          GM_addStyle(cssText);
+          log('CSS 通过 GM_addStyle 注入成功');
+        } else {
+          const style = document.createElement('style');
+          style.textContent = cssText;
+          (document.head || document.documentElement).appendChild(style);
+          log('CSS 通过 style 元素注入');
+        }
+      } catch (e) {
+        log('CSS注入出错，尝试备用方式:', e);
+        const style = document.createElement('style');
+        style.textContent = cssText;
+        (document.head || document.documentElement).appendChild(style);
+      }
+
+      function makeRow(label, valueId, defaultText) {
+        return el('div', {className: 'stats-row'}, [
+          el('span', {className: 'stats-label'}, label),
+          el('span', {className: 'stats-value', id: valueId}, defaultText || '0')
+        ]);
+      }
+      function makeBtn(extraCls, attr, val, text, active) {
+        var a = {className: 'speed-btn' + (extraCls ? ' ' + extraCls : '') + (active ? ' active' : '')};
+        a['data-' + attr] = val;
+        return el('button', a, text);
+      }
+      function makeSelector(label, btns) {
+        return el('div', {className: 'speed-selector'}, [
+          el('span', {className: 'speed-label'}, label),
+          el('div', {className: 'speed-buttons'}, btns)
+        ]);
+      }
+
+      var statusDot = el('span', {className: 'status-indicator stopped', id: 'status-dot'});
+      var statusText = el('span', {id: 'auto-status'}, '未启动');
+      var statusVal = el('span', {className: 'stats-value'}, [statusDot, statusText]);
+      var btnStop = el('button', {className: 'action-btn btn-stop', id: 'btn-auto-stop'}, '停止运行');
+      btnStop.style.display = 'none';
+
+      var panel = el('div', {id: 'linuxdo-auto-panel'}, [
+        el('h3', {}, [
+          el('span', {}, 'Linux.do 自动浏览助手'),
+          el('button', {className: 'btn-minimize', id: 'btn-minimize'}, '-')
+        ]),
+        el('div', {className: 'panel-content'}, [
+          makeSelector('速度:', [
+            makeBtn('', 'speed', 'slow', '慢', currentSpeed === 'slow'),
+            makeBtn('', 'speed', 'normal', '正常', currentSpeed === 'normal'),
+            makeBtn('', 'speed', 'fast', '快', currentSpeed === 'fast'),
+            makeBtn('', 'speed', 'turbo', '极速', currentSpeed === 'turbo')
+          ]),
+          makeSelector('列表:', [
+            makeBtn('list-btn', 'list', 'latest', '最新', currentList === 'latest'),
+            makeBtn('list-btn', 'list', 'new', '新帖', currentList === 'new'),
+            makeBtn('list-btn', 'list', 'unread', '未读', currentList === 'unread')
+          ]),
+          makeSelector('点赞:', [
+            makeBtn('like-btn', 'like', 'true', '开启', enableLike),
+            makeBtn('like-btn', 'like', 'false', '关闭', !enableLike)
+          ]),
+          makeSelector('点赞概率:', [
+            makeBtn('chance-btn', 'chance', 'low', '低', currentLikeChance === 'low'),
+            makeBtn('chance-btn', 'chance', 'medium', '中', currentLikeChance === 'medium'),
+            makeBtn('chance-btn', 'chance', 'high', '高', currentLikeChance === 'high'),
+            makeBtn('chance-btn', 'chance', 'veryHigh', '极高', currentLikeChance === 'veryHigh')
+          ]),
+          el('button', {className: 'action-btn btn-start', id: 'btn-auto-start'}, '开始自动浏览'),
+          btnStop,
+          el('button', {className: 'action-btn btn-clear', id: 'btn-clear-history'}, '清除浏览记录'),
+          el('div', {className: 'stats'}, [
+            el('div', {className: 'stats-row'}, [
+              el('span', {className: 'stats-label'}, '状态'),
+              statusVal
+            ]),
+            makeRow('页面类型', 'page-type', '-'),
+            makeRow('本次帖子', 'session-viewed', '0'),
+            makeRow('本次回复', 'session-replies', '0'),
+            makeRow('本次点赞', 'session-liked', '0'),
+            makeRow('总计帖子', 'total-viewed', '0'),
+            makeRow('总计回复', 'total-replies', '0'),
+            makeRow('总计点赞', 'total-liked', '0')
+          ])
+        ])
+      ]);
 
       document.body.appendChild(panel);
       this.panel = panel;
+      log('面板已添加到DOM, 验证:', !!document.getElementById('linuxdo-auto-panel'));
 
       // 绑定事件
       document.getElementById('btn-auto-start').addEventListener('click', () => this.start());
@@ -1398,7 +1431,13 @@
   }
 
   // ==================== 启动 ====================
-  const automation = new LinuxDoAutomation();
-  automation.init();
+  console.log('[LinuxDo自动化] 脚本开始执行...');
+  try {
+    const automation = new LinuxDoAutomation();
+    automation.init();
+  } catch (e) {
+    console.error('[LinuxDo自动化] 启动失败:', e);
+    alert('[LinuxDo自动化] 脚本启动失败: ' + e.message);
+  }
 
 })();
